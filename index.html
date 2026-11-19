@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D褶皱构造｜背斜向斜地形倒置</title>
+<style>
+*{box-sizing:border-box;font-family:"Microsoft YaHei",sans-serif;margin:0;padding:0;}
+body{overflow:hidden;background:#f0f4f8;}
+
+/* 左侧说明面板 */
+#infoPanel{
+    position:absolute;
+    top:16px;
+    left:16px;
+    width:270px;
+    background:#ffffff;
+    padding:16px;
+    border-radius:12px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.15);
+    z-index:10;
+}
+#infoPanel h3{font-size:17px;margin-bottom:10px;color:#222;}
+#infoPanel p{font-size:14px;line-height:1.7;color:#444;margin:5px 0;}
+
+/* 右侧控制面板 */
+#controlPanel{
+    position:absolute;
+    top:16px;
+    right:16px;
+    width:230px;
+    background:#fff;
+    padding:16px;
+    border-radius:12px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.15);
+    z-index:10;
+}
+#controlPanel button{
+    width:100%;
+    padding:9px;
+    margin:5px 0;
+    border:none;
+    border-radius:7px;
+    background:#2b78e4;
+    color:white;
+    font-size:14px;
+    cursor:pointer;
+}
+#speedBox{margin-top:10px;}
+#speedText{font-size:14px;display:block;margin-bottom:5px;}
+#speedSlider{width:100%;}
+
+/* 底部提示 */
+#tip{
+    position:absolute;
+    bottom:16px;
+    left:16px;
+    background:#fff;
+    padding:10px 14px;
+    border-radius:8px;
+    box-shadow:0 3px 8px rgba(0,0,0,0.12);
+    font-size:13px;
+    z-index:10;
+}
+
+#canvasWrap{width:100vw;height:100vh;}
+.labelTag{
+    position:absolute;
+    font-size:26px;
+    font-weight:bold;
+    color:#111;
+    pointer-events:none;
+    display:none;
+}
+</style>
+</head>
+<body>
+<div id="infoPanel">
+    <h3>📐褶皱构造（地形倒置）</h3>
+    <p>✅背斜：岩层向上拱起，核老翼新</p>
+    <p>✅向斜：岩层向下弯曲，核新翼老</p>
+    <p>🔹阶段1：地壳挤压形成褶皱</p>
+    <p>🔹阶段2：外力侵蚀→背斜成谷、向斜成山</p>
+    <p>💡原理：背斜顶部张力裂隙多，易被侵蚀</p>
+</div>
+
+<div id="controlPanel">
+    <button id="btnFold">①地壳挤压·形成褶皱</button>
+    <button id="btnErode">②外力侵蚀·地形倒置</button>
+    <button id="btnPause">⏸️暂停动画</button>
+    <button id="btnReset">↺重置岩层</button>
+    <div id="speedBox">
+        <span id="speedText">动画速度：1.00x</span>
+        <input type="range" id="speedSlider" min="0.2" max="3" step="0.1" value="1">
+    </div>
+</div>
+
+<div id="tip">🖱️鼠标拖拽旋转 | 滚轮缩放</div>
+<div id="canvasWrap"></div>
+<div class="labelTag" id="tagBeiXie">背斜</div>
+<div class="labelTag" id="tagXiangXie">向斜</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+// ========== 场景初始化 ==========
+const scene = new THREE.Scene();
+scene.background.set("#f5f7fa");
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 300);
+camera.position.set(0,8,16);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+document.getElementById("canvasWrap").appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// 光照
+const ambientLight = new THREE.AmbientLight(0xffffff,0.75);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff,1.2);
+dirLight.position.set(10,16,8);
+dirLight.castShadow = true;
+scene.add(dirLight);
+
+// ========== 变量定义 ==========
+const rockColorList = [0x5a3f2e,0x7a5c48,0x9c7c66,0xbb9b86,0xdac7b4];
+const layerGap = 0.78;
+let layerArray = [];
+
+const tagBeiXie = document.getElementById("tagBeiXie");
+const tagXiangXie = document.getElementById("tagXiangXie");
+
+const MAX_FOLD = 2.9;
+const MAX_ERODE = 2.3;
+let foldProgress = 0;
+let erodeProgress = 0;
+let isAnimating = false;
+let isPause = false;
+let stage = 0;
+let animSpeed = 1.0;
+
+// ========== 创建单层岩层 ==========
+function createLayer(yPos,colorVal){
+    const geo = new THREE.PlaneGeometry(24,5,50,14);
+    const mat = new THREE.MeshLambertMaterial({color:colorVal, side:THREE.DoubleSide});
+    const mesh = new THREE.Mesh(geo,mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = yPos;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+}
+
+// ========== 更新岩层变形 ==========
+function updateMeshShape(){
+    layerArray.forEach(mesh=>{
+        const pos = mesh.geometry.attributes.position;
+        for(let i=0; i<pos.count; i++){
+            const x = pos.getX(i);
+            const foldHeight = MAX_FOLD * foldProgress * Math.sin(x * 0.41);
+            let erodeCut = 0;
+            if(erodeProgress>0){
+                const waveVal = Math.sin(x * 0.41);
+                if(waveVal>0.42){
+                    erodeCut = MAX_ERODE * erodeProgress * waveVal;
+                }
+            }
+            pos.setY(i, pos.getY(i) + foldHeight - erodeCut);
+        }
+        mesh.geometry.computeVertexNormals();
+        pos.needsUpdate = true;
+    })
+    updateLabelPosition();
+}
+
+// ========== 更新背斜向斜文字标签位置 ==========
+function updateLabelPosition(){
+    const beiPos = new THREE.Vector3(0, MAX_FOLD*foldProgress +1.2, 3.5);
+    beiPos.project(camera);
+    tagBeiXie.style.left = ((beiPos.x +1)/2 * window.innerWidth)+"px";
+    tagBeiXie.style.top = ((1 - beiPos.y)/2 * window.innerHeight)+"px";
+
+    const xiangPos = new THREE.Vector3(8, -MAX_FOLD*foldProgress +1.2, 3.5);
+    xiangPos.project(camera);
+    tagXiangXie.style.left = ((xiangPos.x +1)/2 * window.innerWidth)+"px";
+    tagXiangXie.style.top = ((1 - xiangPos.y)/2 * window.innerHeight)+"px";
+}
+
+// ========== 重建所有岩层（重置） ==========
+function rebuildAllLayers(){
+    layerArray.forEach(m=>scene.remove(m));
+    layerArray = [];
+    rockColorList.forEach((c,idx)=>{
+        const oneLayer = createLayer(-idx*layerGap, c);
+        scene.add(oneLayer);
+        layerArray.push(oneLayer);
+    })
+    tagBeiXie.style.display = "none";
+    tagXiangXie.style.display = "none";
+}
+
+// ========== 挤压褶皱动画 ==========
+function runFoldAnim(){
+    isAnimating = true;
+    isPause = false;
+    const step = 0.008;
+    function loop(){
+        if(isPause){requestAnimationFrame(loop);return;}
+        foldProgress += step * animSpeed;
+        if(foldProgress >=1){
+            foldProgress = 1;
+            isAnimating = false;
+            stage =1;
+            tagBeiXie.style.display = "block";
+            tagXiangXie.style.display = "block";
+            return;
+        }
+        updateMeshShape();
+        requestAnimationFrame(loop);
+    }
+    loop();
+}
+
+// ========== 侵蚀动画 ==========
+function runErodeAnim(){
+    isAnimating = true;
+    isPause = false;
+    const step = 0.007;
+    function loop(){
+        if(isPause){requestAnimationFrame(loop);return;}
+        erodeProgress += step * animSpeed;
+        if(erodeProgress >=1){
+            erodeProgress =1;
+            isAnimating = false;
+            stage =2;
+            tagBeiXie.style.display = "block";
+            tagXiangXie.style.display = "block";
+            return;
+        }
+        updateMeshShape();
+        requestAnimationFrame(loop);
+    }
+    loop();
+}
+
+// ========== 按钮绑定 ==========
+const btnFold = document.getElementById("btnFold");
+const btnErode = document.getElementById("btnErode");
+const btnPause = document.getElementById("btnPause");
+const btnReset = document.getElementById("btnReset");
+const speedSlider = document.getElementById("speedSlider");
+const speedText = document.getElementById("speedText");
+
+speedSlider.oninput = ()=>{
+    animSpeed = Number(speedSlider.value);
+    speedText.innerText = `动画速度：${animSpeed.toFixed(2)}x`;
+}
+
+btnFold.onclick = ()=>{
+    if(isAnimating || stage!==0) return;
+    runFoldAnim();
+}
+btnErode.onclick = ()=>{
+    if(isAnimating || stage!==1) return;
+    runErodeAnim();
+}
+btnPause.onclick = ()=>{
+    if(!isAnimating) return;
+    isPause = !isPause;
+    btnPause.innerText = isPause ? "▶️继续动画" : "⏸️暂停动画";
+}
+btnReset.onclick = ()=>{
+    isAnimating = false;
+    isPause = false;
+    foldProgress =0;
+    erodeProgress =0;
+    stage =0;
+    rebuildAllLayers();
+    btnPause.innerText = "⏸️暂停动画";
+}
+
+// 底部平台
+const floorGeo = new THREE.PlaneGeometry(26,7);
+const floorMat = new THREE.MeshLambertMaterial({color:0xd4d4d4, side:THREE.DoubleSide});
+const floorMesh = new THREE.Mesh(floorGeo,floorMat);
+floorMesh.rotation.x = -Math.PI/2;
+floorMesh.position.y = -rockColorList.length*layerGap -1.6;
+floorMesh.receiveShadow = true;
+scene.add(floorMesh);
+
+// ✅【最重要初始化】页面加载直接生成岩层
+rebuildAllLayers();
+
+// 渲染循环
+function renderLoop(){
+    requestAnimationFrame(renderLoop);
+    controls.update();
+    renderer.render(scene,camera);
+}
+renderLoop();
+
+// 窗口大小自适应
+window.addEventListener("resize",()=>{
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+})
+</script>
+</body>
+</html>
